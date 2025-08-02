@@ -83,14 +83,18 @@ spread = (np.sum(tranche_cashflows) / np.sum(avg_notional[:-1])) * 10000  # in b
 
 # Greeks (finite differences on r0 and sigma)
 def compute_greek_shifted(base_param, shift, param_name):
-    kwargs = {"r0": r0, "sigma": sigma}
-    kwargs[param_name] = base_param + shift
-    shifted_rates = simulate_cir_paths(**kwargs, kappa=kappa, theta=theta, T=T, n_paths=n_paths)
+    new_r0 = r0 if param_name != "r0" else base_param + shift
+    new_sigma = sigma if param_name != "sigma" else base_param + shift
+
+    shifted_rates = simulate_cir_paths(
+        r0=new_r0, kappa=kappa, theta=theta, sigma=new_sigma, T=T, n_paths=n_paths
+    )
+
     shifted_losses = np.cumsum(shifted_rates * dt * exposure_factor, axis=1)
     shifted_losses = np.minimum(shifted_losses, 1.0)
-    shifted_tranche_losses = np.clip(shifted_losses - attachment, 0, detachment - attachment) / (detachment - attachment)
-    return np.mean(shifted_tranche_losses, axis=0)
-
+    shifted_tranche = np.clip(shifted_losses - attachment, 0, detachment - attachment) / (detachment - attachment)
+    return np.mean(shifted_tranche, axis=0)
+    
 epsilon = 0.005
 delta_path = (compute_greek_shifted(r0, epsilon, "r0") - compute_greek_shifted(r0, -epsilon, "r0")) / (2 * epsilon)
 vega_path = (compute_greek_shifted(sigma, epsilon, "sigma") - compute_greek_shifted(sigma, -epsilon, "sigma")) / (2 * epsilon)
