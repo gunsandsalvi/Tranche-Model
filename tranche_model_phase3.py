@@ -3,8 +3,10 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 st.set_page_config(layout="wide")
 st.title("Tranche Pricing with Greeks and Optionality (Phase 3)")
+n_names = 125  # typical for CDX index
 
 # === SIDEBAR ===
 st.sidebar.header("Simulation Controls")
@@ -62,6 +64,17 @@ tranche_losses = np.clip(cum_losses - attachment, 0, detachment - attachment) / 
 avg_loss = np.mean(tranche_losses, axis=0)
 avg_notional = 1 - avg_loss
 tranche_cashflows = avg_notional[:-1] * dt  # approximation
+
+# Stepwise cumulative number of defaulted names
+defaulted_names = np.round(cum_losses * n_names).astype(int)
+
+# Inferred correlation proxy (loss variance normalized)
+expected_loss = np.mean(tranche_losses[:, -1])
+loss_variance = np.var(tranche_losses[:, -1])
+correlation_proxy = (
+    loss_variance / (expected_loss * (1 - expected_loss))
+    if expected_loss * (1 - expected_loss) > 0 else 0
+)
 
 # PUF and Spread Estimation
 discount_factor = np.exp(-r0 * T)
@@ -128,6 +141,32 @@ ax3.set_xlabel("Time (Years)")
 ax3.set_ylabel("Greek Value")
 ax3.legend()
 st.pyplot(fig3)
+
+col3, col4 = st.columns(2)
+
+with col3:
+    st.subheader("Cumulative Defaulted Names")
+    fig_def, ax_def = plt.subplots()
+    for i in range(min(10, n_paths)):
+        ax_def.step(time_grid, defaulted_names[i, :], where='post', alpha=0.4)
+    ax_def.plot(time_grid, np.mean(defaulted_names, axis=0), label="Mean", color='black')
+    ax_def.set_xlabel("Time (Years)")
+    ax_def.set_ylabel("Number of Defaults")
+    ax_def.set_ylim(0, n_names)
+    ax_def.legend()
+    st.pyplot(fig_def)
+
+with col4:
+    st.subheader("Inferred Correlation Proxy")
+    st.write(f"**Proxy ρ ≈ {correlation_proxy:.3f}** (based on tranche loss variance)")
+    fig_corr, ax_corr = plt.subplots()
+    ax_corr.hist(tranche_losses[:, -1], bins=30, alpha=0.6, color='skyblue', edgecolor='black')
+    ax_corr.axvline(expected_loss, color='red', linestyle='--', label='Mean Loss')
+    ax_corr.set_title("Distribution of Final Tranche Losses")
+    ax_corr.set_xlabel("Final Tranche Loss")
+    ax_corr.set_ylabel("Frequency")
+    ax_corr.legend()
+    st.pyplot(fig_corr)
 
 # Final Metrics
 st.subheader("Final Metrics")
