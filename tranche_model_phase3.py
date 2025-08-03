@@ -2,11 +2,11 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- Streamlit App Config ---
+# --- Streamlit Setup ---
 st.set_page_config(layout="wide")
-st.title("📘 Credit Tranche Pricing App – Phase 4.2")
+st.title("💵 Credit Tranche Pricing App – Phase 4.3 (USD Units)")
 
-# --- GUI Inputs ---
+# --- Sidebar: Inputs ---
 with st.sidebar:
     st.header("📌 Simulation Inputs")
     r0 = st.slider("Initial Intensity r₀", 0.005, 0.15, 0.05, step=0.005)
@@ -34,8 +34,9 @@ n_steps = int(T / dt)
 time_grid = np.linspace(0, T, n_steps + 1)
 discount_curve = np.exp(-0.01 * time_grid)
 n_paths = 500
+total_index_size = 125_000_000  # USD
 
-# --- CIR Simulation ---
+# --- CIR Path Simulation ---
 def simulate_cir_paths(r0, kappa, theta, sigma, n_paths, n_steps, dt):
     r = np.zeros((n_paths, n_steps + 1))
     r[:, 0] = r0
@@ -64,11 +65,14 @@ def compute_tranche_valuation(r_paths):
     running_leg = np.sum(notional[:, :call_idx] * running_spread * dt * discount[:call_idx], axis=1)
     protection_leg = tranche_loss[:, -1]
 
-    running_pv = np.mean(running_leg)
-    protection_pv = np.mean(protection_leg)
+    # Scale by tranche notional
+    tranche_notional = (detachment - attachment) * total_index_size
+    running_pv = np.mean(running_leg) * tranche_notional
+    protection_pv = np.mean(protection_leg) * tranche_notional
     net_cost = running_pv - protection_pv
 
-    avg_notional = np.mean(np.sum(notional * dt * discount, axis=1))
+    # For equivalent spread: normalize by discounted avg notional
+    avg_notional = np.mean(np.sum(notional * dt * discount, axis=1)) * tranche_notional
     eq_spread = running_pv / avg_notional if avg_notional > 0 else 0
 
     return {
@@ -79,58 +83,59 @@ def compute_tranche_valuation(r_paths):
         "running_leg": running_pv,
         "protection_leg": protection_pv,
         "cost": net_cost,
-        "eq_spread": eq_spread
+        "eq_spread": eq_spread,
+        "tranche_notional": tranche_notional
     }
 
-# --- Simulate ---
+# --- Simulations ---
 base_paths = simulate_cir_paths(r0, kappa, theta, sigma, n_paths, n_steps, dt)
 shock_paths = simulate_cir_paths(r0 + shock_r0, kappa, theta, sigma + shock_sigma, n_paths, n_steps, dt)
 
 res_base = compute_tranche_valuation(base_paths)
 res_shock = compute_tranche_valuation(shock_paths)
 
-# --- Output Metrics ---
-colA, colB = st.columns(2)
-with colA:
-    st.subheader("🔵 Base Scenario")
+# --- Display Metrics ---
+col1, col2 = st.columns(2)
+with col1:
+    st.subheader("🔵 Base Scenario (in USD)")
     st.metric("Equivalent Spread", f"{res_base['eq_spread']*10000:.2f} bps")
-    st.metric("Total Cost to Buyer", f"{res_base['cost']:.5f} units")
-    st.metric("PV of Running Leg", f"{res_base['running_leg']:.5f}")
-    st.metric("PV of Protection Leg", f"{res_base['protection_leg']:.5f}")
+    st.metric("Running Leg PV", f"${res_base['running_leg'] / 1e6:,.3f} M")
+    st.metric("Protection Leg PV", f"${res_base['protection_leg'] / 1e6:,.3f} M")
+    st.metric("Net PV to Buyer", f"${res_base['cost'] / 1e6:,.3f} M")
 
-with colB:
-    st.subheader("🟠 Shocked Scenario")
+with col2:
+    st.subheader("🟠 Shocked Scenario (in USD)")
     st.metric("Eq Spread (Shocked)", f"{res_shock['eq_spread']*10000:.2f} bps")
-    st.metric("Cost to Buyer (Shocked)", f"{res_shock['cost']:.5f} units")
-    pnl = (res_base['eq_spread'] - res_shock['eq_spread']) * 10000 * hedge_ratio
-    st.metric("Estimated Hedge PnL", f"{pnl:.2f} bps")
+    st.metric("Net PV to Buyer (Shocked)", f"${res_shock['cost'] / 1e6:,.3f} M")
+    pnl = (res_base['eq_spread'] - res_shock['eq_spread']) * 10000 * hedge_ratio * total_index_size / 10000
+    st.metric("Estimated Hedge PnL", f"${pnl / 1e6:,.3f} M")
 
 # --- Charts ---
 st.subheader("📉 Average Notional Remaining")
 fig1, ax1 = plt.subplots()
 ax1.plot(res_base["time"], np.mean(res_base["notional"], axis=0), label="Base", lw=2)
 ax1.plot(res_shock["time"], np.mean(res_shock["notional"], axis=0), label="Shocked", lw=2, linestyle="--")
-ax1.set_ylabel("Remaining Notional")
+ax1.set_ylabel("Remaining Tranche Notional (% of tranche)")
 ax1.set_xlabel("Time (years)")
 ax1.grid(True)
 ax1.legend()
 st.pyplot(fig1)
 
-st.subheader("📊 Inferred Correlation Proxy (Std of Loss)")
-corr_proxy = np.std(res_base["loss"], axis=0)
+st.subheader("📊 Inferred Correlation Proxy (Std Dev of Loss)")
 fig2, ax2 = plt.subplots()
-ax2.plot(res_base["time"], corr_proxy, color="purple", label="Std Dev of Loss")
-ax2.set_ylabel("Standard Deviation")
+corr_proxy = np.std(res_base["loss"], axis=0)
+ax2.plot(res_base["time"], corr_proxy, label="Std Dev of Loss", color="purple")
+ax2.set_ylabel("Std Dev (Correlation Proxy)")
 ax2.set_xlabel("Time (years)")
 ax2.grid(True)
 ax2.legend()
 st.pyplot(fig2)
 
-st.subheader("🧮 Expected Cumulative Defaults")
-avg_cum = np.mean(1 - res_base["notional"], axis=0)
+st.subheader("🧮 Cumulative Defaults (Expected)")
 fig3, ax3 = plt.subplots()
-ax3.step(res_base["time"], avg_cum * 125, where="post", label="Expected Defaults", color="darkgreen")
-ax3.set_ylabel("# of Defaults (out of 125)")
+expected_defaults = np.mean(1 - res_base["notional"], axis=0) * 125
+ax3.step(res_base["time"], expected_defaults, where="post", label="Expected Defaults", color="darkgreen")
+ax3.set_ylabel("Defaulted Names (out of 125)")
 ax3.set_xlabel("Time (years)")
 ax3.grid(True)
 ax3.legend()
