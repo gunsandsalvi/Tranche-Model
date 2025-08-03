@@ -1,15 +1,35 @@
+# tranche_model_phase44.py
+
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # --- Streamlit Setup ---
 st.set_page_config(layout="wide")
-st.title("💵 Credit Tranche Pricing App – Phase 4.3 (USD Units)")
+st.title("💵 Credit Tranche Pricing App – Phase 4.4 (PnL + Live Calibration)")
 
-# --- Sidebar: Inputs ---
+# --- Market Data Fetch (Live Calibration) ---
+@st.cache_data(ttl=3600)
+def fetch_cdx_5y_spread():
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2"
+    try:
+        df = pd.read_csv(url, index_col=0, parse_dates=True)
+        return df.iloc[-1, 0]  # latest spread in bps
+    except:
+        return None
+
+spread5y = fetch_cdx_5y_spread()
+if spread5y is not None:
+    st.sidebar.metric("Live CDX 5Y Spread (FRED)", f"{spread5y:.1f} bps")
+    r0_default = (spread5y / 10000) / 0.6  # assume 40% recovery
+else:
+    r0_default = 0.05
+
+# --- Sidebar Inputs ---
 with st.sidebar:
     st.header("📌 Simulation Inputs")
-    r0 = st.slider("Initial Intensity r₀", 0.005, 0.15, 0.05, step=0.005)
+    r0 = st.slider("Initial Intensity r₀", 0.005, 0.15, float(r0_default), step=0.005)
     sigma = st.slider("Volatility σ", 0.01, 0.5, 0.15, step=0.01)
     kappa = st.slider("Mean Reversion κ", 0.01, 1.0, 0.3, step=0.01)
     theta = st.slider("Long-term Intensity θ", 0.01, 0.2, 0.07, step=0.005)
@@ -29,14 +49,14 @@ with st.sidebar:
 
 # --- Constants ---
 T = 5
+n_steps = int(T * 12)
 dt = 1 / 12
-n_steps = int(T / dt)
 time_grid = np.linspace(0, T, n_steps + 1)
 discount_curve = np.exp(-0.01 * time_grid)
 n_paths = 500
-total_index_size = 125_000_000  # USD
+total_index_size = 125_000_000
 
-# --- CIR Path Simulation ---
+# --- CIR Simulation ---
 def simulate_cir_paths(r0, kappa, theta, sigma, n_paths, n_steps, dt):
     r = np.zeros((n_paths, n_steps + 1))
     r[:, 0] = r0
@@ -60,18 +80,15 @@ def compute_tranche_valuation(r_paths):
     notional = 1 - tranche_loss
     discount = np.exp(-0.01 * local_time)
 
-    call_idx = min([int(y/dt) for y in callable_years], default=len(local_time))
+    call_idx = min([int(y / dt) for y in callable_years], default=len(local_time))
 
     running_leg = np.sum(notional[:, :call_idx] * running_spread * dt * discount[:call_idx], axis=1)
     protection_leg = tranche_loss[:, -1]
 
-    # Scale by tranche notional
     tranche_notional = (detachment - attachment) * total_index_size
     running_pv = np.mean(running_leg) * tranche_notional
     protection_pv = np.mean(protection_leg) * tranche_notional
     net_cost = running_pv - protection_pv
-
-    # For equivalent spread: normalize by discounted avg notional
     avg_notional = np.mean(np.sum(notional * dt * discount, axis=1)) * tranche_notional
     eq_spread = running_pv / avg_notional if avg_notional > 0 else 0
 
@@ -83,8 +100,7 @@ def compute_tranche_valuation(r_paths):
         "running_leg": running_pv,
         "protection_leg": protection_pv,
         "cost": net_cost,
-        "eq_spread": eq_spread,
-        "tranche_notional": tranche_notional
+        "eq_spread": eq_spread
     }
 
 # --- Simulations ---
@@ -107,36 +123,44 @@ with col2:
     st.subheader("🟠 Shocked Scenario (in USD)")
     st.metric("Eq Spread (Shocked)", f"{res_shock['eq_spread']*10000:.2f} bps")
     st.metric("Net PV to Buyer (Shocked)", f"${res_shock['cost'] / 1e6:,.3f} M")
-    pnl = (res_base['eq_spread'] - res_shock['eq_spread']) * 10000 * hedge_ratio * total_index_size / 10000
+    pnl = (res_base['eq_spread'] - res_shock['eq_spread']) * total_index_size * hedge_ratio
     st.metric("Estimated Hedge PnL", f"${pnl / 1e6:,.3f} M")
+
+# --- PnL Attribution ---
+st.subheader("📉 PnL Attribution (Buyer Perspective)")
+dp_cost = res_shock['cost'] - res_base['cost']
+dp_running = res_shock['running_leg'] - res_base['running_leg']
+dp_protection = res_shock['protection_leg'] - res_base['protection_leg']
+
+st.write(f"- Δ Running Leg PV: ${dp_running/1e6:.3f} M")
+st.write(f"- Δ Protection Leg PV: ${dp_protection/1e6:.3f} M")
+st.write(f"- → Net Δ Cost to Buyer: ${dp_cost/1e6:.3f} M")
 
 # --- Charts ---
 st.subheader("📉 Average Notional Remaining")
 fig1, ax1 = plt.subplots()
 ax1.plot(res_base["time"], np.mean(res_base["notional"], axis=0), label="Base", lw=2)
 ax1.plot(res_shock["time"], np.mean(res_shock["notional"], axis=0), label="Shocked", lw=2, linestyle="--")
-ax1.set_ylabel("Remaining Tranche Notional (% of tranche)")
+ax1.set_ylabel("Remaining Tranche Notional")
 ax1.set_xlabel("Time (years)")
 ax1.grid(True)
 ax1.legend()
 st.pyplot(fig1)
 
 st.subheader("📊 Inferred Correlation Proxy (Std Dev of Loss)")
-fig2, ax2 = plt.subplots()
 corr_proxy = np.std(res_base["loss"], axis=0)
-ax2.plot(res_base["time"], corr_proxy, label="Std Dev of Loss", color="purple")
-ax2.set_ylabel("Std Dev (Correlation Proxy)")
+fig2, ax2 = plt.subplots()
+ax2.plot(res_base["time"], corr_proxy, color="purple")
+ax2.set_ylabel("Std Dev of Loss")
 ax2.set_xlabel("Time (years)")
 ax2.grid(True)
-ax2.legend()
 st.pyplot(fig2)
 
 st.subheader("🧮 Cumulative Defaults (Expected)")
+avg_cum = np.mean(1 - res_base["notional"], axis=0) * 125
 fig3, ax3 = plt.subplots()
-expected_defaults = np.mean(1 - res_base["notional"], axis=0) * 125
-ax3.step(res_base["time"], expected_defaults, where="post", label="Expected Defaults", color="darkgreen")
-ax3.set_ylabel("Defaulted Names (out of 125)")
+ax3.step(res_base["time"], avg_cum, where="post", color="darkgreen")
+ax3.set_ylabel("Expected Defaulted Names")
 ax3.set_xlabel("Time (years)")
 ax3.grid(True)
-ax3.legend()
 st.pyplot(fig3)
